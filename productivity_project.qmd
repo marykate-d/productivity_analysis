@@ -468,8 +468,8 @@ The model's performance on the test data was exceptional, even outperforming the
 ## Feature Importance
 
 ```{r source, echo=FALSE, cache=TRUE}
-#code to load in helper functions below (may need to turn eval on to render?)
-source("/Users/mkdurka/Documents/Behavioral Data Science II/Final Project/helpers.R")
+#code to load in helper functions below
+source("helpers.R")
 ```
 
 ```{r explainer}
