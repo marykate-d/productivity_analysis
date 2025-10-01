@@ -1,0 +1,616 @@
+---
+title: "Productivity Project"
+format: pdf
+execute:
+  echo: false
+  message: false
+  warning: false
+editor: visual
+highlight-style: breezedark
+---
+
+```{r load_packages, include=FALSE}
+library(tidyverse)
+library(tidymodels)
+library(skimr)
+library(recipes)
+library(themis)
+library(kknn)
+library(glmnet)
+library(discrim)
+library(DALEX)
+library(DALEXtra)
+```
+
+```{r read_data, message=FALSE, echo=FALSE}
+employee <- read_csv("/Users/mkdurka/Documents/Behavioral Data Science II/Final Project/data/garments_worker_productivity.csv", show_col_types = FALSE)
+```
+
+```{r team_breakdown, echo=FALSE}
+num <- employee %>% group_by(team) %>% summarize(n = n()) %>% arrange(n)
+```
+
+## Section 1 - Introduction
+
+Nearly every job in existence has some form of performance metric, usually centered around productivity. What productivity looks like may differ from job to job, however, they all have some way of measuring an employee's performance. If people are not meeting their expected goals for productivity, it may clue the employer into something being wrong. At worse, not meeting expectations may result in letting the employee go.
+
+It is unsurprising, then, that companies are highly interested in and invested in the productivity of their employees. With this in mind, being able to predict if an employee is meeting their productivity goal would be incredibly useful for an employer. Being aware of potentially under-performing employees would also allow employers to intervene early to provide help to their employees and ensure they are able to meet continue meeting their goals.
+
+The data used for this project was downloaded from the [UC Irvine Machine Learning Repository](https://archive.ics.uci.edu/dataset/597/productivity+prediction+of+garment+employees) and contains information on `r length(unique(employee$team))` teams within the garment industry. Each row provides information about the team's performance on a given day, over the course of `r num %>% filter(team == 11) %>% pull(n)` to `r num %>% filter(team == 8) %>% pull(n)` days, for a total of `r nrow(employee)` collective observations.
+
+The garment industry is a highly demanding industry which has a particular focus on productivity due to its global demand (Imran et al., 2021). To meet the ever growing demand, employee productivity within this industry is particularly vital (Balla et al., 2020)
+
+For the purposes of this analysis, I will be creating a dichotomous variable to represent whether or not a specific team met their targeted productivity. I will be attempting to predict whether or not they met their goal by looking at a number of variables included in this dataset. See below for a list of the variables included in the dataset:
+
+-   date : Date in MM-DD-YYYY
+-   day : Day of the Week (Monday, Tuesday, Wednesday, etc.)
+-   quarter : A portion of the month. A month was divided into four quarters
+-   department : Associated department with the instance
+-   team : Associated team number with the instance
+-   no_of_workers : Number of workers in each team
+-   no_of_style_change : Number of changes in the style of a particular product
+-   targeted_productivity : Targeted productivity set by the Authority for each team for each day.
+-   smv : Standard Minute Value, this is the allocated time for a task
+-   wip : Work in progress. Includes the number of unfinished items for products
+-   over_time : Represents the amount of overtime by each team in minutes
+-   incentive : Represents the amount of financial incentive (in BDT) that enables or motivates a particular course of action.
+-   idle_time : The amount of time when the production was interrupted due to several reasons
+-   idle_men : The number of workers who were idle due to production interruption
+-   actual_productivity : The actual % of productivity that was delivered by the workers. It ranges from 0-1.
+
+## Section 2 - Data
+
+::: callout-note
+## Note about the data:
+
+Some of the variables below - specifically, the date, department, and day of the week - are non-continuous variables and will likely need to be dropped in order to perform the analyses and build the models necessary. I intend to keep the variable "quarter" as the time of month is likely to be an important factor, however, it will need to be re-coded for the purpose of this project. With dropping the previously mentioned variables, I am still over the minimum requirement of at least 10 predictors.
+:::
+
+```{r skim,}
+skim(employee)
+```
+
+## Section 3 - Outcome and predictor variables
+
+As stated previously, I am creating a dichotomous variable that indicates whether or not a particular team met their target production goals. This new variable will be called `goal_met`, with a 1 indicating the goal was met, and a 0 indicating the team fell below their targeted productivity on that day.
+
+```{r goal_met}
+employee <- employee %>% 
+  mutate(goal_met = ifelse(targeted_productivity <= actual_productivity, 1, 0))
+
+employee %>% 
+  count(goal_met)
+```
+
+As indicated above, teams fell below their targeted productivity `r employee %>% count(goal_met) %>% filter(goal_met == 0) %>% pull(n)` times. There is class imbalance in the outcome variable, which may need to be accounted for.
+
+The majority of the variables included are likely to be important predictors for the outcome - however, there are a few that I think will be particularly important. For instance, the number of workers on a team and the incentive available to the workers for meeting goals will likely be important. The number of style changes that a particular product has is also likely to be very predictive as a higher number would indicate a more complex product and/or a constant need to adapt. More overtime work is also likely to be predictive of meeting productivity goals, as the overtime is likely to be spent ensuring that the goals are met. Idle time and idle men will also likely be very important in ensuring productivity is high.
+
+```{r prep_data}
+employee <- employee %>% 
+  select(!c("department", "date", "day", "actual_productivity")) %>% 
+  mutate(wip = ifelse(is.na(wip), 0, wip)) %>% 
+  mutate(quarter = as.factor(quarter),
+         team = as.factor(team),
+         goal_met = as.factor(goal_met))
+```
+
+## Section 4 - Modeling plan
+
+### Specific research questions:
+
+Does higher monetary incentives predict meeting performance goals?
+
+-   I hypothesize that incentives will be highly predictive of meeting performance goals - higher incentives for the team will increase the motivation each team feels form meeting their goals. I will examine this by looking at feature importance plots and by creating PDP plots looking at the incentive variable.
+
+Will the number of workers on a team interact with the number of works in progress to predict performance goals being met?
+
+-   Having a high number of workers alone is likely to be good for meeting performance goals, however, looking at the interaction between the number of workers as well as the number of in progress projects will likely more accurately predict the performance of that team.
+
+Lastly, will the number of style changes be an important predictor for meeting performance goals?
+
+-   A higher number of changes likely indicates more complex work that a particular team is doing, and it suggests a greater need for constant adaptation from that team. This constant need for adaptation and constant interruption of their current flow will likely be an important predictor for performance goals being met. I will examine this by looking at feature importance plots and by creating PDP plots looking at the number of style changes variable.
+
+I will be examining several different models to see which models perform the best for this kind of data. For these models, I will look at two tree-based methods - random forest and xgboost - as well as a naive bayes model and a kNN model. I will evaluate the balanced accuracy and confusion matrices for all four models to compare model performance and select the best performing model. I will tune the best performing model of the three and finally see how it performs on the test data.
+
+------------------------------------------------------------------------
+
+# Analysis
+
+## Data Exploration
+
+To start off, I need to do some simple data exploration to understand more about the data. For this, let's take a quick look at the data itself:
+
+```{r skim_2}
+skim(employee)
+```
+
+We can also look at the distribution or proportion of the outcome variable `goal_met`, see pie chart below.
+
+```{r pie_goal_met}
+employee %>% 
+  mutate(goal_met = factor(goal_met, levels = c(0, 1), labels = c("Goal Not Met", "Goal Met"))) %>%
+  group_by(goal_met) %>% 
+  summarise(n = n()) %>% 
+  mutate(percentage = n/sum(n)) %>% 
+  ggplot(aes(x = "", y = percentage, fill = goal_met)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar("y", start=0) +
+  theme_void() +
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = .5)) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(
+    title = "Pie Chart of Outcome Variable: Goals Met"
+  ) +
+  geom_text(aes(label = paste0(goal_met,":", " ", round(percentage*100, 0), "%")), 
+            position = position_stack(vjust = 0.5), 
+            color = "white", size = 4, fontface = "bold") 
+
+```
+
+## Recipe
+
+```{r create_split}
+set.seed(123)
+split <- initial_split(employee, strata = goal_met)
+
+train <- training(split)
+test  <- testing(split)
+
+folds <- vfold_cv(train, v = 10, strata = goal_met)
+
+metrics_set <- metric_set(bal_accuracy, roc_auc)
+```
+
+```{r recipe}
+#| echo: true
+rec <- recipe(goal_met ~ ., data = train) %>% 
+  step_upsample(goal_met, over_ratio = 0.5) %>% 
+  step_normalize(all_numeric_predictors()) %>% 
+  step_dummy(all_factor_predictors()) 
+```
+
+```{r prep_bake}
+baked <- rec %>% 
+  prep() %>% 
+  bake(new_data = NULL)
+```
+
+For the recipe, I've added a `step_normalize` for all numeric predictors, and a `step_dummy` for the factor predictors.
+
+Based outcome variable's imbalance, I have also chosen to upsample the goal not being met, to help with training the model. I've set the ratio to 50%, as is shown below:
+
+```{r pie_goal_met2}
+baked %>% 
+  mutate(goal_met = factor(goal_met, levels = c(0, 1), labels = c("Goal Not Met", "Goal Met"))) %>%
+  group_by(goal_met) %>% 
+  summarise(n = n()) %>% 
+  mutate(percentage = n/sum(n)) %>% 
+  ggplot(aes(x = "", y = percentage, fill = goal_met)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar("y", start=0) +
+  theme_void() +
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = .5)) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(
+    title = "Pie Chart of Outcome Variable: Goals Met"
+  ) +
+  geom_text(aes(label = paste0(goal_met,":", " ", round(percentage*100, 0), "%")), 
+            position = position_stack(vjust = 0.5), 
+            color = "white", size = 4, fontface = "bold") 
+
+```
+
+## Training Models: Naive Bayes, kNN, Random Forest, XGBoost
+
+I created and trained four different machine learning models to compare performances: Naive Bayes, kNN, Random Forest, XGBoost. I only want to tune a limited number of models in order to save computational power, so I will be first training the models without tuning the parameters. Once I can compare performance between the four models, I will tune the best performing model, and then fit it to the test data.
+
+```{r naive_bayes, cache=TRUE}
+nb_spec <- naive_Bayes(mode = "classification",
+                       engine ="naivebayes") 
+
+nb_wflow <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(nb_spec)
+
+nb_fit <- nb_wflow %>% 
+  fit_resamples(folds,
+                metrics = metrics_set)
+
+nb_metrics <- collect_metrics(nb_fit) %>% 
+  mutate(model = "Naive Bayes Model") %>% 
+  select(model, .metric, mean)
+```
+
+Although, I do not intend to tune the models before I compare them, I did choose to tune the kNN model in order to select the number of neighbors to use. I made this exception to avoid choosing randomly, without any prior reasoning for that value. The results of the tuning process are below.
+
+```{r knn, cache=TRUE}
+knn_spec_tune <- nearest_neighbor(
+    mode = "classification",
+    engine = "kknn",
+    neighbors = tune()
+)
+
+knn_wf_tune <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(knn_spec_tune)
+
+neighbor_grid <- tibble(neighbors = seq(3, 20, 1))
+
+set.seed(123)
+
+knn_fit_tune <- knn_wf_tune %>% 
+  tune_grid(
+    resamples = folds,
+    grid = neighbor_grid,
+    metrics = metrics_set
+  )
+
+results <- collect_metrics(knn_fit_tune)
+
+results %>% 
+  ggplot(aes(x = neighbors, y = mean)) +
+  geom_line() +
+  theme_minimal()
+
+```
+
+```{r final_knn, cache=TRUE}
+chosen_n <- knn_fit_tune %>% 
+  select_best(metric = "bal_accuracy")
+print(paste0("Optimal number of neighbors for kNN model: ", chosen_n %>% pull(neighbors))) 
+
+final_knn <- finalize_workflow(knn_wf_tune, chosen_n)
+
+knn_fit <- final_knn %>% 
+  fit_resamples(folds,
+                metrics = metrics_set)
+
+knn_metrics <- collect_metrics(knn_fit) %>% 
+  mutate(model = "kNN Model") %>% 
+  select(model, .metric, mean)
+```
+
+```{r random_forest, cache=TRUE}
+rf_spec <- rand_forest(mode = "classification") %>% 
+  set_engine("randomForest")
+
+rf_wflow <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(rf_spec)
+
+rf_fit <- rf_wflow %>% 
+  fit_resamples(folds,
+                metrics = metrics_set)
+
+rf_metrics <- collect_metrics(rf_fit) %>% 
+  mutate(model = "Random Forest Model") %>% 
+  select(model, .metric, mean)
+```
+
+```{r xgboost, cache=TRUE}
+boost_spec <- boost_tree(mode = "classification") %>% 
+  set_engine("xgboost")
+
+boost_wflow <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(boost_spec)
+
+boost_fit <- boost_wflow %>% 
+  fit_resamples(folds,
+                metrics = metrics_set)
+
+boost_metrics <- collect_metrics(boost_fit) %>% 
+  mutate(model = "XGBoosted Tree Model") %>% 
+  select(model, .metric, mean)
+```
+
+## Collecting Metrics
+
+After having fit all models to the training data, I can collect the metrics for all four and choose the best performing model.
+
+```{r allmetrics}
+all_metrics <- bind_rows(nb_metrics, knn_metrics, rf_metrics, boost_metrics) %>% 
+  arrange(desc(mean)) %>%
+  pivot_wider(names_from = .metric, values_from = mean) %>% 
+  rename(Model = model,
+         `ROC AUC` = roc_auc,
+         `Balanced Accuracy` = bal_accuracy)
+
+all_metrics
+```
+
+The performance of the Random Forest model and the XGBoosted Tree model were nearly identical. The Random Forest slightly outperformed the XGBoosted Tree when looking at the ROC AUC, but the XGBoosted Tree slightly outperformed the Random Forest on balanced accuracy. Based on how close these two models performed, I will tune both, and evaluate which performs better after tuning on the resampled data. This estimation will allow me to see which might be better to evaluate performance on the testing data.
+
+## Tuning the XGBoosted Tree Model
+
+```{r tune_xgboost, cache=TRUE}
+xgb_spec <- boost_tree(
+  trees = tune(),
+  tree_depth = tune(),
+  learn_rate = tune(),
+  loss_reduction = tune(),  
+  sample_size = tune(),
+  mtry = tune()             
+) %>%
+  set_engine("xgboost") %>%
+  set_mode("classification")  
+
+workflow_obj <- workflow() %>%
+  add_model(xgb_spec) %>%
+  add_recipe(rec)
+
+xgb_grid <- grid_latin_hypercube(
+  trees(),
+  tree_depth(),
+  learn_rate(),
+  loss_reduction(),
+  sample_size = sample_prop(),
+  finalize(mtry(), train),
+  size = 20
+)
+
+set.seed(123)
+xgb_tuned <- tune_grid(
+  workflow_obj,
+  resamples = folds,
+  grid = xgb_grid,
+  metrics = metrics_set
+)
+
+best_params <- select_best(xgb_tuned)
+
+print(paste0("Optimal mtry value for XGBoost model: ", best_params %>% pull(mtry))) 
+print(paste0("Optimal tree depth for XGBoost model: ", best_params %>% pull(tree_depth))) 
+print(paste0("Optimal learn rate for XGBoost model: ", round(best_params %>% pull(learn_rate), 3))) 
+print(paste0("Optimal loss reduction for XGBoost model: ", round(best_params %>% pull(loss_reduction), 3))) 
+print(paste0("Optimal sample size for XGBoost model: ", round(best_params %>% pull(sample_size), 3))) 
+print(paste0("Optimal number of trees for XGBoost model: ", best_params %>% pull(trees)))
+
+# Finalize and fit
+final_wf <- finalize_workflow(workflow_obj, best_params)
+
+b_final_fit <- final_wf %>% 
+  fit_resamples(folds,
+                metrics = metrics_set)
+
+b_metrics <- collect_metrics(b_final_fit) %>% 
+  mutate(model = "XGBoosted Model") %>% 
+  select(model, .metric, mean)
+
+
+```
+
+## Tuning the Random Forest Model
+
+```{r tune_rf, cache=TRUE}
+rf_spec_tune <- rand_forest(mode = "classification",
+                            mtry = tune(),
+                            min_n = tune(), 
+                            trees = tune()) %>% 
+  set_engine("randomForest")
+
+rf_wflow_tune <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(rf_spec_tune)
+
+rf_grid <- grid_regular(
+  mtry(range = c(2, 10)),
+  min_n(range = c(2, 10)),
+  trees(range = c(100, 1000)),
+  levels = 4  
+)
+
+set.seed(123)
+
+rf_tuned <- tune_grid(
+  rf_wflow_tune,
+  resamples = folds,
+  grid = rf_grid,
+  metrics = metrics_set
+)
+```
+
+```{r rf_best, cache=TRUE}
+rf_best <- select_best(rf_tuned)
+
+print(paste0("Optimal mtry value for Random Forest model: ", rf_best %>% pull(mtry))) 
+print(paste0("Optimal min_n value for Random Forest model: ", rf_best %>% pull(min_n))) 
+print(paste0("Optimal number of trees for Random Forest model: ", rf_best %>% pull(trees)))
+
+rf_final_workflow <- finalize_workflow(rf_wflow_tune, rf_best)
+
+rf_final_fit <- rf_final_workflow %>% 
+  fit_resamples(folds,
+                metrics = metrics_set)
+
+rf_metrics <- collect_metrics(rf_final_fit) %>% 
+  mutate(model = "Random Forest Model") %>% 
+  select(model, .metric, mean)
+```
+
+## Comparing Tuned Performance
+
+```{r tunedmetrics}
+tuned_metrics <- bind_rows(rf_metrics, b_metrics) %>% 
+  pivot_wider(names_from = .metric,
+              values_from = mean)
+
+tuned_metrics
+```
+
+The tuned Random Forest model slightly outperformed the XGBoosted model on the resampled training data. Based on this result, the Random Forest model is the one that will be evaluated on the testing data and examined further.
+
+## Evaluation on the Testing Data
+
+```{r eval_test_data}
+rf_test_fit <- rf_final_workflow %>% 
+  fit(test)
+
+bal_accuracy_metric <- rf_test_fit %>% 
+  augment(test) %>% 
+  bal_accuracy(goal_met, estimate = .pred_class)
+
+roc_auc_metric <- rf_test_fit %>% 
+  augment(test) %>% 
+  roc_auc(goal_met, .pred_0)
+
+metrics <- bind_rows(bal_accuracy_metric, roc_auc_metric)
+
+metrics
+
+```
+
+The model's performance on the test data was exceptional, even outperforming the estimated performance on the resampled training data. This is encouraging, as it indicates the model performs well on new data and is not overfit to the training set.
+
+## Feature Importance
+
+```{r source, echo=FALSE, cache=TRUE}
+#code to load in helper functions below (may need to turn eval on to render?)
+source("/Users/mkdurka/Documents/Behavioral Data Science II/Final Project/helpers.R")
+```
+
+```{r explainer}
+#| results: 'hide'
+explainer_rf <- make_explainer_obj(rf_test_fit)
+```
+
+```{r feature_importance, cache=TRUE}
+vip_res <- model_parts(explainer_rf)
+
+top_vars <- vip_res %>%
+  filter(variable != "_baseline_", variable != "_full_model_") %>%
+  group_by(variable) %>%
+  summarise(mean_loss = mean(dropout_loss), .groups = "drop_last") %>%
+  slice_max(mean_loss, n = 5) %>%
+  pull(variable)
+
+ggplot_imp(vip_res %>% filter(variable %in% top_vars | variable == "_full_model_")) +
+  theme_minimal() +
+  labs(title = "Top 5 Most Important Features",
+       subtitle = "Tuned Random Forest Model") +
+  theme(plot.title = element_text(hjust = .5),
+        plot.subtitle = element_text(hjust = .5))
+
+```
+
+## RQ 1: Does higher monetary incentives predict meeting performance goals?
+
+-   *Original Hypothesis:* I hypothesize that incentives will be highly predictive of meeting performance goals.
+
+As predicted, incentive was the most important feature in predicting meeting performance goals, Taking a closer look at the feature, reveals that an excessive incentive does not necessarily mean a higher likelihood of meeting the goal for that team, but that incentive equaling or above the average incentive offered (raw mean = `r round(employee %>% summarise(mean_incent = mean(incentive)) %>% pull(mean_incent), 2)`, in BDT), does drastically increase the likelihood of their goals being met:
+
+```{r incentive}
+pdp_incentive <- model_profile(explainer_rf, N = 100, variables = "incentive")
+
+ggplot_ice(pdp_incentive, incentive) +
+  theme_minimal() +
+  labs(
+    title = "Centered Conditional ICE Plot for Incentive",
+    x = "Incentive",
+    y = "yhat"
+  )
+```
+
+## RQ 2: Will the number of workers on a team interact with the number of works in progress to predict performance goals being met?
+
+-   *Original Hypothesis:* Having a high number of workers alone is likely to be good for meeting performance goals, however, looking at the interaction between the number of workers as well as the number of in progress projects will likely more accurately predict the performance of that team.
+
+As hypothesized, a higher number of workers and the number of works in progress were both among the top 5 features in the model - see ICE plots below for individual features.
+
+```{r workers}
+pdp_workers <- model_profile(explainer_rf, N = 100, variables = "no_of_workers")
+
+ggplot_ice(pdp_workers, no_of_workers) +
+  theme_minimal() +
+  labs(
+    title = "Centered Conditional ICE Plot for Number of Workers",
+    x = "Number of Workers",
+    y = "yhat"
+  ) 
+
+pdp_wip <- model_profile(explainer_rf, N = 100, variables = "wip")
+
+ggplot_ice(pdp_wip, wip) +
+  theme_minimal() +
+  labs(
+    title = "Centered Conditional ICE Plot for Work in Progress ",
+    x = "Work in Progress",
+    y = "yhat"
+  ) 
+```
+
+I wanted, however, to see if the two variables together seemed to show any kind of dependence on eachother. To explore this, I created the two-way PDP plot below:
+
+```{r two-way, cache=TRUE}
+p <- pdp_2way(rf_test_fit, no_of_workers, wip)
+p +
+  labs(
+    title = "2-way Partial Dependence Plot for Number of Workers and Work in Progress",
+    y = "Work in Progress",
+    fill = "Likelihood of Not Meeting Goal", 
+    x = "Number of Workers"
+  )
+```
+
+From this plot, it's clear that the hypothesis stating they will be dependent on each other was not supportive. Having fewer workers is predictive of not meeting the team's goals, but this doesn't change depending on the amount of work in progress. I would argue that this is indicative of an appropriate overall balance between the number of workers on a team and the amount of work in progress for that team. If this balance were not in place, a company might be able to locate this issue here.
+
+## RQ 3: Will the number of style changes be an important predictor for meeting performance goals?
+
+-   *Original Hypothesis:* A higher number of style changes likely indicates more complex work that a particular team is doing, and it suggests a greater need for constant adaptation from that team. This constant need for adaptation and constant interruption of their current flow will likely be an important predictor for performance goals being met.
+
+The original hypothesis above was not supported. The number of style changes a team was not among the top 5 (or even top 10) most important features for this model. Instead, the standard minute value (which refers to the allocated time for a task) appeared as the second most important feature for this model.
+
+```{r smv}
+pdp_smv <- model_profile(explainer_rf, N = 100, variables = "smv")
+
+ggplot_ice(pdp_smv, smv) +
+  theme_minimal() +
+  labs(
+    title = "Centered Conditional ICE Plot for Standard Minute Value ",
+    x = "Standard Minute Value",
+    y = "yhat"
+  ) 
+```
+
+Lastly, the dummy coded "Team 10" was also an important feature. Based on the PDP below, if this team was the one being evaluated (`team_X10 = 1`), there was a *reduced* likelihood that the goal would be met that day.
+
+This is particularly helpful in identifying a problematic team, or a team that is struggling to maintain high performance.
+
+```{r team10}
+pdp_team10 <- model_profile(explainer_rf, N = 100, variables = "team_X10")
+
+ggplot_ice(pdp_team10, team_X10) +
+  theme_minimal() +
+  labs(
+    title = "Centered Conditional ICE Plot for Team 10",
+    x = "Team 10",
+    y = "yhat"
+  ) 
+```
+
+## Section 5 - Conclusion
+
+The tuned random forest model performed best on the training data among all four tested models(balanced accuracy = `r round(rf_metrics %>% filter(.metric == "bal_accuracy") %>% pull(mean), 2)`, ROC AUC = `r round(rf_metrics %>% filter(.metric == "roc_auc") %>% pull(mean), 2)`). It performed even better on the testing data, indicating that it was not overfit to the training data and is able to perform well on new data (balanced accuracy = `r round(metrics %>% filter(.metric == "bal_accuracy") %>% pull(.estimate), 2)`, ROC AUC = `r round(metrics %>% filter(.metric == "roc_auc") %>% pull(.estimate), 2)`). Incentive, standard minute value, the number of workers, and the amount of work in progress were among the top five most important features in the model. The team #10 was also highly predictive of whether or not the goal would be met.
+
+With the exception of style changes, the variables I hypothesized would rank high in importance did turn out to be important features. The interaction predicted, however, was not supported. Exploring each of the five most important features individually also revealed some important and useful information.
+
+For incentive, if the amount offered was at the mean (raw mean = `r round(employee %>% summarise(mean_incent = mean(incentive)) %>% pull(mean_incent), 2)`, in BDT), we saw a dramatic increase in the likelihood of a goal being met. However, above the mean, there was very little difference seen later. This can be helpful to employers utilizing this model, as it can identify when additional monetary incentive begins to be ineffective.
+
+For the standard minute value, perhaps unsurprisingly, projects which on average took less time, increased the likelihood of meeting the goal, while longer projects decreased the likelihood of meeting the goal. This is particularly helpful for an employer as they can identify the project length that begins to have a negative impact on the team's ability to reach their targeted productivity. Such longer projects should be taken into account both when setting realistic goals and determining how many people a team should include.
+
+The number of workers on a team and the amount of work in progress were also important features in predicting if the goal was met or not. As expected, more workers tended to correspond to a greater likelihood of the goal being met, and the amount of work in progress was negatively predictive of the team's goal being met.
+
+Finally, team 10 was predictive of *not* meeting the goal. Including the team number in the model was helpful as it allowed the model to identify a particularly problematic team that might need extra support or interventions to meet their goals. Had the team been positively predicting of meeting the goal, the employer might look into the team's system to see how to help other teams be as efficient as them.
+
+------------------------------------------------------------------------
+
+**References:**
+
+Abdullah Al Imran, Md Shamsur Rahim, and Tanvir Ahmed (2021) Mining the productivity data of the garment industry. Int. J. Bus. Intell. Data Min. 19, 3 (2021), 319–342. https://doi.org/10.1504/ijbidm.2021.118183
+
+Balla, I., Rahayu, S., & Purnama, J. J. (2021). GARMENT EMPLOYEE PRODUCTIVITY PREDICTION USING RANDOM FOREST. Techno Nusa Mandiri: Journal of Computing and Information Technology, 18(1), 49–54. https://doi.org/10.33480/techno.v18i1.2210
+
+Productivity Prediction of Garment Employees \[Dataset\]. (2020). UCI Machine Learning Repository. https://doi.org/10.24432/C51S6D.
