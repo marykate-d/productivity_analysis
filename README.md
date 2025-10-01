@@ -72,6 +72,7 @@ This project uses machine learning techniques to predict whether a team of garme
 ### 📄 Output Format
 
 - Final report generated as a **PDF** using Quarto.
+- Quarto slides (raw quarto file and **PDF** output) provided with overview of analysis and results. 
 
 ---
 
