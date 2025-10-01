@@ -1,4 +1,4 @@
-
+#as this project was created as an assignment for a course, this helper file was provided to students for use in their assignments and projects.
 make_explainer_obj <- function(fitted_workflow){
   fitted_model <-
     fitted_workflow %>% 
