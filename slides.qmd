@@ -1,0 +1,477 @@
+---
+title: "Machine Learning Analysis"
+subtitle: "Analysis of Productivity"
+author: "MK Durka"
+format: 
+  revealjs:
+    theme: blood
+---
+
+```{r load_pkg, echo=FALSE}
+library(tidyverse)
+library(tidymodels)
+library(skimr)
+library(recipes)
+library(themis)
+library(kknn)
+library(glmnet)
+library(discrim)
+library(DALEX)
+library(DALEXtra)
+library(knitr)
+```
+
+```{r read_data, message=FALSE, echo=FALSE, cache=TRUE}
+employee <- read_csv("/Users/mkdurka/Documents/Behavioral Data Science II/Final Project/data/garments_worker_productivity.csv", show_col_types = FALSE)
+
+```
+
+```{r team_breakdown, echo=FALSE}
+num <- employee %>% group_by(team) %>% summarize(n = n()) %>% arrange(n)
+```
+
+------------------------------------------------------------------------
+
+## Introduction
+
+Performance metrics - and whether or not employees are meeting them - are vital to business success. 
+
+:::: {.columns}
+
+::: {.column width="50%" style="font-size:80%;"}
+
+* productivity may differ from job to job
+* all jobs have some way of measuring an employee's performance
+* companies are highly interested in and invested in the productivity of their employees
+
+:::
+
+::: {.column width="50%" style="font-size:80%;"}
+
+* being able to predict if their teams or employees will meet their productivity goal would be incredibly useful for an employer
+* being aware of potentially under-performing employees or teams allows employers to intervene early 
+
+:::
+
+::::
+
+## The Data
+::: callout-note 
+# Data Source
+<div style="font-size: 0.8em;">
+The data used for this project was downloaded from the [UC Irvine Machine Learning Repository](https://archive.ics.uci.edu/dataset/597/productivity+prediction+of+garment+employees) and contains information on `r length(unique(employee$team))` teams within the garment industry.
+</div>
+:::
+
+::: callout-note
+# Observations
+<div style="font-size: 0.8em;">
+Each row provides information about the team's performance on a given day, over the course of `r num %>% filter(team == 11) %>% pull(n)` to `r num %>% filter(team == 8) %>% pull(n)` days, for a total of `r nrow(employee)` collective observations.
+</div>
+:::
+
+::: callout-note
+# Data from the Garment Industry
+<div style="font-size: 0.8em;">
+The garment industry is a highly demanding industry with a particular focus on productivity due to its global demand (Imran et al., 2021). To meet the growing demand, employee productivity within this industry is vital (Balla et al., 2020)
+</div>
+:::
+
+## The Data Cont. 
+
+
+::: {.panel-tabset style="font-size:100%;"}
+
+## Outcome
+
+::: callout-note
+# Creating outcome
+
+The outcome variable is a dichotomous variable I created that indicates whether or not a particular team met their target production goals. This new variable will be called `goal_met`, with a 1 indicating the goal was met, and a 0 indicating the team fell below their targeted productivity on that day.
+
+:::
+
+```{r}
+employee <- employee %>% 
+  mutate(goal_met = ifelse(targeted_productivity <= actual_productivity, 1, 0))
+
+kable(employee %>% 
+  count(goal_met))
+```
+
+```{r}
+employee <- employee %>% 
+  select(!c("department", "date", "day", "actual_productivity")) %>% 
+  mutate(wip = ifelse(is.na(wip), 0, wip)) %>% 
+  mutate(quarter = as.factor(quarter),
+         team = as.factor(team),
+         goal_met = as.factor(goal_met))
+```
+
+## Summary
+
+Predictor Variables:
+
+:::: {.columns style="font-size:58%;"}
+
+::: {.column width="50%"}
+
+-   quarter : A portion of the month. A month was divided into four quarters
+-   team : Associated team number with the instance
+-   no_of_workers : Number of workers in each team
+-   no_of_style_change : Number of changes in the style of a particular product
+-   targeted_productivity : Targeted productivity set by the Authority for each team for each day.
+-   smv : Standard Minute Value, this is the allocated time for a task
+:::
+
+::: {.column width="50%"}
+
+-   wip : Work in progress. Includes the number of unfinished items for products
+-   over_time : Represents the amount of overtime by each team in minutes
+-   incentive : Represents the amount of financial incentive (in BDT) that enables or motivates a particular course of action.
+-   idle_time : The amount of time when the production was interrupted due to several reasons
+-   idle_men : The number of workers who were idle due to production interruption
+
+:::
+
+::::
+
+:::
+
+## Hypotheses
+
+* Higher incentive will be highly predictive of meeting performance goals 
+
+* The number of workers on a team will interact with the number of projects in progress to predict performance goals being met
+
+* The number of style changes will be an important predictor for meeting performance goals
+
+
+## [Data Exploration and Pre-Processing]{.r-fit-text}
+
+::: {.panel-tabset style="font-size:100%;"}
+
+# Outcome
+
+```{r}
+employee %>% 
+  mutate(goal_met = factor(goal_met, levels = c(0, 1), labels = c("Goal Not Met", "Goal Met"))) %>%
+  group_by(goal_met) %>% 
+  summarise(n = n()) %>% 
+  mutate(percentage = n/sum(n)) %>% 
+  ggplot(aes(x = "", y = percentage, fill = goal_met)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar("y", start=0) +
+  theme_void() +
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = .5, size = 20),
+        ) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(
+    title = "Outcome Variable: Goal Met"
+  ) +
+  geom_text(aes(label = paste0(goal_met,":", " ", round(percentage*100, 0), "%")), 
+            position = position_stack(vjust = 0.5), 
+            color = "white", size = 5, fontface = "bold") 
+```
+
+# Recipe 
+
+```{r}
+set.seed(123)
+split <- initial_split(employee, strata = goal_met)
+
+train <- training(split)
+test  <- testing(split)
+
+folds <- vfold_cv(train, v = 10, strata = goal_met)
+
+metrics_set <- metric_set(bal_accuracy, roc_auc)
+```
+
+
+```{r}
+#| echo: true
+
+rec <- recipe(goal_met ~ ., data = train) %>% 
+  step_upsample(goal_met, over_ratio = 0.5) %>% 
+  step_normalize(all_numeric_predictors()) %>% 
+  step_dummy(all_factor_predictors()) 
+```
+
+```{r}
+baked <- rec %>% 
+  prep() %>% 
+  bake(new_data = NULL)
+```
+
+# Upsampled Outcome
+```{r}
+baked %>% 
+  mutate(goal_met = factor(goal_met, levels = c(0, 1), labels = c("Goal Not Met", "Goal Met"))) %>%
+  group_by(goal_met) %>% 
+  summarise(n = n()) %>% 
+  mutate(percentage = n/sum(n)) %>% 
+  ggplot(aes(x = "", y = percentage, fill = goal_met)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar("y", start=0) +
+  theme_void() +
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = .5, size = 20)) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(
+    title = "Upsampled Outcome: Goals Met"
+  ) +
+  geom_text(aes(label = paste0(goal_met,":", " ", round(percentage*100, 0), "%")), 
+            position = position_stack(vjust = 0.5), 
+            color = "white", size = 5, fontface = "bold") 
+
+```
+
+```{r source_models, message=FALSE, warning=FALSE, cache=TRUE}
+#| results: 'hide'
+#code to load in helper functions below (may need to turn eval on to render?)
+source("/Users/mkdurka/Documents/Behavioral Data Science II/Final Project/helper2.R")
+
+```
+
+:::
+
+## [Creating, Training, and Comparing Models]{.r-fit-text}
+
+<div style="font-size: 0.9em;">
+Four models were trained and I collected metrics from all of them:
+
+```{r}
+kable(all_metrics)
+```
+
+The XGBoost and Random Forest models performed the best and I moved forward to tuning both model's parameters. 
+</div>
+
+## Tuned Performance
+<div style="font-size: 0.95em;">
+Having tuned the parameters for both the XGBoost and Random Forest models, I evaluated their performance on the resampled training data:
+
+```{r}
+kable(tuned_metrics %>% rename(
+  Model = model,
+  `ROC AUC` = roc_auc,
+  `Balanced Accuracy` = bal_accuracy))
+```
+
+Random Forest outperformed XGBoost, so I selected this model as the "Final" model to evaluate on the test data. 
+</div>
+## Evaluating Model Performance on Test Data
+
+After evaluating the model's performance on the test data, the following metrics were collected:
+
+```{r}
+kable(metrics %>% mutate(Model = "Random Forest") %>% 
+        pivot_wider(names_from = .metric, values_from = .estimate) %>% 
+        rename(
+               `ROC AUC` = roc_auc,
+               `Balanced Accuracy` = bal_accuracy) %>% 
+        select(Model, `Balanced Accuracy`, `ROC AUC`))
+```
+
+
+## Feature Importance 
+
+```{r}
+feature_plot +
+  theme(plot.title = element_text(size = 20),
+        plot.subtitle = element_text(size = 15),
+        axis.text.x = element_text(size = 15),
+        axis.text.y = element_text(size = 17),
+        axis.title.x = element_text(size = 17))
+```
+
+
+## Hypothesis 1
+
+
+::: {.panel-tabset style="font-size:100%;"}
+
+# Result
+
+Higher incentive will be highly predictive of meeting performance goals 
+
+::: callout-note
+# H1 Supported <span style="color:green;">✔️</span>
+:::
+
+# Incentive Plot
+
+```{r}
+incentive_plot +
+  theme(plot.title = element_text(size = 20),
+        axis.text.x = element_text(size = 15),
+        axis.text.y = element_text(size = 17),
+        axis.title.x = element_text(size = 17),
+        axis.title.y = element_text(size = 17))
+```
+ 
+:::
+
+## Hypothesis 2
+
+
+::: {.panel-tabset style="font-size:100%;"}
+# Result
+
+The number of workers on a team will interact with the number of projects in progress to predict performance goals being met
+
+::: callout-note
+# H2 Partially Supported <span style="color:yellow;">✔️</span>
+:::
+
+# Plot 1
+
+```{r}
+worker_plot +
+  theme(plot.title = element_text(size = 20),
+        axis.text.x = element_text(size = 15),
+        axis.text.y = element_text(size = 17),
+        axis.title.x = element_text(size = 17),
+        axis.title.y = element_text(size = 17))
+```
+
+# Plot 2
+
+```{r}
+wip_plot +
+  theme(plot.title = element_text(size = 20),
+        axis.text.x = element_text(size = 15),
+        axis.text.y = element_text(size = 17),
+        axis.title.x = element_text(size = 17),
+        axis.title.y = element_text(size = 17))
+```
+
+
+# 2-Way Plot 
+
+```{r}
+no_worker_2way +
+  theme(plot.title = element_text(size = 20),
+        axis.text.x = element_text(size = 15),
+        axis.text.y = element_text(size = 17),
+        axis.title.x = element_text(size = 17),
+        axis.title.y = element_text(size = 17),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 15))
+```
+
+:::
+
+## Hypothesis 3
+
+::: {.panel-tabset style="font-size:100%;"}
+
+# Result
+
+The number of style changes will be an important predictor for meeting performance goals
+
+::: callout-note
+# H3 Not Supported <span style="color:red;">X</span> 
+:::
+
+# Standard Minute Value Plot
+
+```{r}
+smv_plot +
+  theme(plot.title = element_text(size = 20),
+        axis.text.x = element_text(size = 15),
+        axis.text.y = element_text(size = 17),
+        axis.title.x = element_text(size = 17),
+        axis.title.y = element_text(size = 17))
+```
+
+# Team 10 Plot
+
+```{r}
+team_10_plot +
+  theme(plot.title = element_text(size = 20),
+        axis.text.x = element_text(size = 15),
+        axis.text.y = element_text(size = 17),
+        axis.title.x = element_text(size = 17),
+        axis.title.y = element_text(size = 17))
+```
+
+
+:::
+
+## Conclusion
+
+Tuned Random Forest Results
+
+:::: {.columns}
+
+::: {.column width="50%"}
+
+The tuned random forest model demonstrated excellent performance on the testing data (balanced accuracy = `r round(metrics %>% filter(.metric == "bal_accuracy") %>% pull(.estimate), 2)`, ROC AUC = `r round(metrics %>% filter(.metric == "roc_auc") %>% pull(.estimate), 2)`). 
+
+:::
+
+::: {.column width="50%"}
+
+Top 5 Most Important Features:
+
+* incentive
+* standard minute value
+* the number of workers
+* works in progress
+* team #10 
+
+:::
+
+::::
+
+## Conclusion
+
+::: {.panel-tabset style="font-size:95%;"}
+
+# Incentive 
+
+If the amount offered was at the mean:
+
+* dramatic increase in the likelihood of a goal being met.
+
+Above the mean
+
+* very little additional increase in likelihood 
+
+This can be helpful to employers utilizing this model, as it can identify when additional monetary incentive begins to be ineffective. 
+
+# SMV
+
+For standard minute value:
+
+* projects which on average took less time, increased the likelihood of meeting the goal 
+* longer projects decreased the likelihood of meeting the goal
+
+This is particularly helpful for an employer as they can identify the project length that begins to have a negative impact on the team's ability to reach their targeted productivity.
+
+# No of Workers/WIP
+
+The number of workers on a team and the amount of work in progress were also important features in predicting if the goal was met or not. 
+
+* more workers corresponded to greater likelihood of the goal being met 
+* the amount of work in progress was negatively predictive of the team's goal being met
+
+# Team 10
+
+Finally, team 10 was predictive of *not* meeting the goal. 
+
+Including the team number in the model was helpful as it allowed the model to identify a particularly problematic team that might need extra support or interventions to meet their goals. 
+
+:::
+
+## References:
+
+Abdullah Al Imran, Md Shamsur Rahim, and Tanvir Ahmed (2021) Mining the productivity data of the garment industry. Int. J. Bus. Intell. Data Min. 19, 3 (2021), 319–342. https://doi.org/10.1504/ijbidm.2021.118183
+
+Balla, I., Rahayu, S., & Purnama, J. J. (2021). GARMENT EMPLOYEE PRODUCTIVITY PREDICTION USING RANDOM FOREST. Techno Nusa Mandiri: Journal of Computing and Information Technology, 18(1), 49–54. https://doi.org/10.33480/techno.v18i1.2210
+
+Productivity Prediction of Garment Employees \[Dataset\]. (2020). UCI Machine Learning Repository. https://doi.org/10.24432/C51S6D.
+
