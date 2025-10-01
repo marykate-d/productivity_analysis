@@ -1,6 +1,3 @@
-# productivity_analysis
-Using machine learning to analyze team productivity and determine key predictors of meeting productivity goals
-
 # Productivity Project: Predicting Employee Performance in the Garment Industry
 
 This project uses machine learning techniques to predict whether a team of garment workers met their daily productivity targets based on operational, time, and workforce-related features.
