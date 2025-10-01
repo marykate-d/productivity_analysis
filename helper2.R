@@ -1,4 +1,5 @@
-
+#this is a helper file I created for use with the presentation slides. This creates, tunes, and pulls model metrics for all models tested in this project.
+#it also pulls in the first helper file (helpers.R) and recreates several of the graphs used in the presentation. 
 library(tidyverse)
 library(tidymodels)
 library(skimr)
@@ -10,7 +11,7 @@ library(discrim)
 library(DALEX)
 library(DALEXtra)
 
-employee <- read_csv("/Users/mkdurka/Documents/Behavioral Data Science II/Final Project/data/garments_worker_productivity.csv", show_col_types = FALSE)
+employee <- read_csv("file_location.csv", show_col_types = FALSE)
 
 num <- employee %>% group_by(team) %>% summarize(n = n()) %>% arrange(n)
 
@@ -240,7 +241,7 @@ roc_auc_metric <- rf_test_fit %>%
 metrics <- bind_rows(bal_accuracy_metric, roc_auc_metric)
 
 #code to load in helper functions below (may need to turn eval on to render?)
-source("/Users/mkdurka/Documents/Behavioral Data Science II/Final Project/helpers.R")
+source("helpers.R")
 
 
 explainer_rf <- make_explainer_obj(rf_test_fit)
