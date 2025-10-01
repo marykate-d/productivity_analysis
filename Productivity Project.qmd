@@ -23,7 +23,7 @@ library(DALEXtra)
 ```
 
 ```{r read_data, message=FALSE, echo=FALSE}
-employee <- read_csv("/Users/mkdurka/Documents/Behavioral Data Science II/Final Project/data/garments_worker_productivity.csv", show_col_types = FALSE)
+employee <- read_csv("file_location.csv", show_col_types = FALSE)
 ```
 
 ```{r team_breakdown, echo=FALSE}
