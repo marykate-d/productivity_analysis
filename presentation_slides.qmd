@@ -230,8 +230,10 @@ baked %>%
 
 ```{r source_models, message=FALSE, warning=FALSE, cache=TRUE}
 #| results: 'hide'
-#code to load in helper functions below (may need to turn eval on to render?)
-source("/Users/mkdurka/Documents/Behavioral Data Science II/Final Project/helper2.R")
+#code to load in helper functions below
+#note, the initial run for this code chunk will take some time as it is re-running the models from the original project. However, after the initial render, this information is cached and subsequent runs will not be as intensive. 
+
+source("helper2.R")
 
 ```
 
